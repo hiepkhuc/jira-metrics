@@ -64,7 +64,7 @@ def generate_throughput_chart(output_dir: str) -> None:
     plt.close()
 
 
-def generate_cycle_time_chart(output_dir: str) -> None:
+def generate_cycle_time_chart(output_dir: str, months: int = 6) -> None:
     """Generate cycle time trend chart with min/max range."""
     csv_path = os.path.join(output_dir, "cycle_time_weekly.csv")
     if not os.path.exists(csv_path):
@@ -76,6 +76,13 @@ def generate_cycle_time_chart(output_dir: str) -> None:
 
     df["date"] = df["week"].apply(parse_week)
     df = df.sort_values("date")
+
+    # Filter to last N months
+    cutoff_date = datetime.now() - pd.Timedelta(days=months * 30)
+    df = df[df["date"] >= cutoff_date]
+
+    if df.empty:
+        return
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -257,20 +264,183 @@ def generate_aging_wip_chart(output_dir: str) -> None:
     plt.close()
 
 
-def generate_all_charts(output_dir: str, verbose: bool = False) -> None:
-    """Generate all charts from CSV files in the output directory."""
-    chart_functions = [
-        ("Throughput", generate_throughput_chart),
-        ("Cycle Time", generate_cycle_time_chart),
-        ("Status Distribution", generate_status_distribution_chart),
-        ("Issue Types", generate_issue_types_chart),
-        ("Workload", generate_workload_chart),
-        ("Aging WIP", generate_aging_wip_chart),
+def generate_bugs_created_chart(output_dir: str, months: int = 6) -> None:
+    """Generate stacked bar chart for bugs created weekly by priority."""
+    csv_path = os.path.join(output_dir, "bugs_created_weekly.csv")
+    if not os.path.exists(csv_path):
+        return
+
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return
+
+    df["date"] = df["week"].apply(parse_week)
+    df = df.sort_values("date")
+
+    # Filter to last N months
+    cutoff_date = datetime.now() - pd.Timedelta(days=months * 30)
+    df = df[df["date"] >= cutoff_date]
+
+    if df.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Stacked bar chart by priority
+    bar_width = 5
+    bottom = [0] * len(df)
+
+    priority_colors = [
+        ("priority_critical", "#B71C1C", "Critical"),
+        ("priority_highest", "#F44336", "Highest"),
+        ("priority_high", "#FF9800", "High"),
+        ("priority_medium", "#FFC107", "Medium"),
+        ("priority_low", "#4CAF50", "Low"),
     ]
 
-    for name, func in chart_functions:
+    for col, color, label in priority_colors:
+        if col in df.columns:
+            ax.bar(df["date"], df[col], width=bar_width, bottom=bottom,
+                   color=color, label=label, alpha=0.9)
+            bottom = [b + v for b, v in zip(bottom, df[col])]
+
+    ax.set_xlabel("Week")
+    ax.set_ylabel("Bugs Created")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-W%W"))
+    ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=max(1, len(df) // 10)))
+    plt.xticks(rotation=45, ha="right")
+
+    ax.legend(loc="upper left")
+    ax.set_ylim(bottom=0)
+
+    plt.title("Bugs Created Weekly by Priority")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "chart_bugs_created.png"), dpi=150)
+    plt.close()
+
+
+def generate_throughput_by_member_chart(output_dir: str, weeks: int = 6) -> None:
+    """Generate grouped bar chart showing each team member's weekly throughput."""
+    csv_path = os.path.join(output_dir, "throughput_by_member.csv")
+    if not os.path.exists(csv_path):
+        return
+
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return
+
+    df["date"] = df["week"].apply(parse_week)
+
+    # Get last N weeks
+    all_weeks = sorted(df["week"].unique())
+    recent_weeks = all_weeks[-weeks:] if len(all_weeks) >= weeks else all_weeks
+    df = df[df["week"].isin(recent_weeks)]
+
+    if df.empty:
+        return
+
+    # Pivot to get members as columns
+    pivot_df = df.pivot_table(
+        index="week", columns="assignee", values="issues_completed", fill_value=0
+    )
+
+    # Sort weeks chronologically
+    pivot_df = pivot_df.reindex(sorted(pivot_df.index, key=lambda w: parse_week(w)))
+
+    # Get top contributors (by total) to limit legend size
+    totals = pivot_df.sum().sort_values(ascending=False)
+    top_members = totals.head(10).index.tolist()
+    pivot_df = pivot_df[top_members]
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    # Create grouped bar chart
+    x = range(len(pivot_df.index))
+    width = 0.8 / len(pivot_df.columns)
+    colors = plt.cm.tab10(range(len(pivot_df.columns)))
+
+    for i, (member, color) in enumerate(zip(pivot_df.columns, colors)):
+        offset = (i - len(pivot_df.columns) / 2 + 0.5) * width
+        bars = ax.bar([xi + offset for xi in x], pivot_df[member],
+                      width=width, label=member, color=color, alpha=0.8)
+
+    ax.set_xlabel("Week")
+    ax.set_ylabel("Issues Completed")
+    ax.set_xticks(x)
+    ax.set_xticklabels(pivot_df.index, rotation=45, ha="right")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=9)
+    ax.set_ylim(bottom=0)
+
+    plt.title(f"Team Member Throughput (Last {len(pivot_df)} Weeks)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "chart_throughput_by_member.png"), dpi=150)
+    plt.close()
+
+
+def generate_bugs_cumulative_chart(output_dir: str) -> None:
+    """Generate cumulative bug trend chart showing created, resolved, and open bugs."""
+    csv_path = os.path.join(output_dir, "bugs_cumulative.csv")
+    if not os.path.exists(csv_path):
+        return
+
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return
+
+    df["date"] = df["week"].apply(parse_week)
+    df = df.sort_values("date")
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    # Fill area for resolved bugs (green)
+    ax.fill_between(df["date"], 0, df["cumulative_resolved"],
+                    alpha=0.3, color="#4CAF50", label="Resolved (cumulative)")
+
+    # Line for cumulative created (red)
+    ax.plot(df["date"], df["cumulative_created"], color="#F44336",
+            linewidth=2, label="Created (cumulative)")
+
+    # Line for open bugs (blue, dashed)
+    ax.plot(df["date"], df["open_bugs"], color="#2196F3",
+            linewidth=2.5, linestyle="-", label="Open Bugs (remaining)")
+
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Bug Count")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=max(1, len(df) // 20)))
+    plt.xticks(rotation=45, ha="right")
+
+    ax.legend(loc="upper left")
+    ax.set_ylim(bottom=0)
+    ax.grid(True, alpha=0.3)
+
+    plt.title("Cumulative Bug Trend (All Time)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "chart_bugs_cumulative.png"), dpi=150)
+    plt.close()
+
+
+def generate_all_charts(output_dir: str, verbose: bool = False, months: int = 6,
+                        include_bug_cumulative: bool = False) -> None:
+    """Generate all charts from CSV files in the output directory."""
+    chart_functions = [
+        ("Throughput", generate_throughput_chart, {}),
+        ("Cycle Time", generate_cycle_time_chart, {"months": months}),
+        ("Status Distribution", generate_status_distribution_chart, {}),
+        ("Issue Types", generate_issue_types_chart, {}),
+        ("Workload", generate_workload_chart, {}),
+        ("Aging WIP", generate_aging_wip_chart, {}),
+        ("Bugs Created", generate_bugs_created_chart, {"months": months}),
+        ("Throughput by Member", generate_throughput_by_member_chart, {"weeks": 6}),
+    ]
+
+    # Add cumulative bug chart if requested
+    if include_bug_cumulative:
+        chart_functions.append(("Bugs Cumulative", generate_bugs_cumulative_chart, {}))
+
+    for name, func, kwargs in chart_functions:
         try:
-            func(output_dir)
+            func(output_dir, **kwargs)
             if verbose:
                 print(f"[INFO] Generated chart: {name}")
         except Exception as e:

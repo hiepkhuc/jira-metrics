@@ -19,16 +19,15 @@ STORY_POINTS_FIELD = "customfield_10016"
 IN_PROGRESS_STATUSES = [
     "In Progress",
     "In Review",
-    "Code Review",
+    "Awaiting Feedback",
+    "Correction Required",
     "Testing",
-    "QA",
+    "In QA",
 ]
 
 DONE_STATUSES = [
     "Done",
-    "Closed",
-    "Resolved",
-    "Complete",
+    "Archived"
 ]
 
 # Aging WIP thresholds (days)
@@ -37,3 +36,6 @@ AGING_CRITICAL_DAYS = 30  # Items older than this are critical
 
 # Output directory for CSV files
 OUTPUT_DIR = "output"
+
+# Default number of months to extract/display
+DEFAULT_MONTHS = 6

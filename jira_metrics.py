@@ -30,6 +30,7 @@ DONE_STATUSES = ["Done", "Closed", "Resolved", "Complete"]
 AGING_WARNING_DAYS = 14
 AGING_CRITICAL_DAYS = 30
 OUTPUT_DIR = "output"
+DEFAULT_MONTHS = 6
 
 
 def load_dependencies():
@@ -37,7 +38,7 @@ def load_dependencies():
     global CONFIG_LOADED
     global JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN, STORY_POINTS_FIELD
     global IN_PROGRESS_STATUSES, DONE_STATUSES
-    global AGING_WARNING_DAYS, AGING_CRITICAL_DAYS, OUTPUT_DIR
+    global AGING_WARNING_DAYS, AGING_CRITICAL_DAYS, OUTPUT_DIR, DEFAULT_MONTHS
 
     if CONFIG_LOADED:
         return True
@@ -54,6 +55,7 @@ def load_dependencies():
             AGING_WARNING_DAYS as warn_days,
             AGING_CRITICAL_DAYS as crit_days,
             OUTPUT_DIR as out_dir,
+            DEFAULT_MONTHS as def_months,
         )
         JIRA_URL = url
         JIRA_EMAIL = email
@@ -64,6 +66,7 @@ def load_dependencies():
         AGING_WARNING_DAYS = warn_days
         AGING_CRITICAL_DAYS = crit_days
         OUTPUT_DIR = out_dir
+        DEFAULT_MONTHS = def_months
     except ImportError:
         try:
             from config import (
@@ -76,6 +79,7 @@ def load_dependencies():
                 AGING_WARNING_DAYS as warn_days,
                 AGING_CRITICAL_DAYS as crit_days,
                 OUTPUT_DIR as out_dir,
+                DEFAULT_MONTHS as def_months,
             )
             JIRA_URL = url
             JIRA_EMAIL = email
@@ -86,6 +90,7 @@ def load_dependencies():
             AGING_WARNING_DAYS = warn_days
             AGING_CRITICAL_DAYS = crit_days
             OUTPUT_DIR = out_dir
+            DEFAULT_MONTHS = def_months
         except ImportError:
             print("Error: No config file found. Create config.py or config_local.py")
             return False
@@ -98,12 +103,14 @@ class JiraMetricsExtractor:
     """Extract and calculate JIRA metrics for team reporting."""
 
     def __init__(self, months: int = 6, verbose: bool = False, output_dir: str = None,
-                 generate_charts: bool = False):
+                 generate_charts: bool = False, bug_history: bool = False):
         self.months = months
         self.verbose = verbose
         self.output_dir = output_dir or OUTPUT_DIR
         self.generate_charts = generate_charts
+        self.bug_history = bug_history
         self.issues = []
+        self.all_bugs = []
         self.start_date = datetime.now() - timedelta(days=months * 30)
 
     def log(self, message: str) -> None:
@@ -147,7 +154,7 @@ class JiraMetricsExtractor:
         # JQL to get all issues created or updated in the time range
         # Exclude Sub-task and Epic issue types
         jql = (
-            f'(created >= "{start_str}" OR updated >= "{start_str}" OR '
+            f'(created >= "{start_str}" OR '
             f'status changed DURING ("{start_str}", now())) '
             f'AND issuetype NOT IN (Sub-task, Epic) '
             f'ORDER BY created DESC'
@@ -212,6 +219,122 @@ class JiraMetricsExtractor:
         self.issues = all_issues
         self.log(f"Total issues fetched: {len(self.issues)}")
         return self.issues
+
+    def fetch_all_bugs(self) -> list:
+        """Fetch all bugs from JIRA (no time filter) for cumulative analysis."""
+        import requests
+        from requests.auth import HTTPBasicAuth
+
+        # JQL to get all bugs, ordered by creation date
+        jql = 'issuetype = Bug ORDER BY created ASC'
+
+        self.log("Fetching all bugs for cumulative analysis...")
+
+        all_bugs = []
+        url = f"{JIRA_URL}/rest/api/3/search/jql"
+        auth = HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN)
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+
+        next_page_token = None
+
+        while True:
+            try:
+                payload = {
+                    "jql": jql,
+                    "maxResults": 100,
+                    "fields": ["created", "resolutiondate", "status", "updated"],
+                }
+
+                if next_page_token:
+                    payload["nextPageToken"] = next_page_token
+
+                response = requests.post(url, json=payload, headers=headers, auth=auth)
+
+                if response.status_code != 200:
+                    print(f"Error fetching bugs: HTTP {response.status_code}")
+                    break
+
+                data = response.json()
+                issues = data.get("issues", [])
+                if not issues:
+                    break
+
+                all_bugs.extend(issues)
+                self.log(f"Fetched {len(all_bugs)} bugs...")
+
+                next_page_token = data.get("nextPageToken")
+                if not next_page_token or data.get("isLast", True):
+                    break
+
+            except Exception as e:
+                print(f"Error fetching bugs: {e}")
+                break
+
+        self.all_bugs = all_bugs
+        self.log(f"Total bugs fetched: {len(self.all_bugs)}")
+        return self.all_bugs
+
+    def calculate_bug_cumulative(self) -> list:
+        """Calculate cumulative bug data from all bugs."""
+        from collections import defaultdict
+
+        # Group by week
+        created_by_week = defaultdict(int)
+        resolved_by_week = defaultdict(int)
+
+        for bug in self.all_bugs:
+            fields = bug.get("fields", {})
+
+            # Created date
+            created_str = fields.get("created", "")[:10]
+            if created_str:
+                created_date = datetime.strptime(created_str, "%Y-%m-%d")
+                created_week = created_date.strftime("%Y-W%W")
+                created_by_week[created_week] += 1
+
+            # Check if bug is resolved by status (not just resolutiondate)
+            status = fields.get("status", {})
+            status_name = status.get("name", "")
+            status_category = status.get("statusCategory", {}).get("name", "")
+
+            is_resolved = status_name in DONE_STATUSES or status_category == "Done"
+
+            if is_resolved:
+                # Use resolutiondate if available, otherwise fall back to updated date
+                resolution_str = fields.get("resolutiondate")
+                if not resolution_str:
+                    resolution_str = fields.get("updated")
+
+                if resolution_str:
+                    resolved_date = datetime.strptime(resolution_str[:10], "%Y-%m-%d")
+                    resolved_week = resolved_date.strftime("%Y-W%W")
+                    resolved_by_week[resolved_week] += 1
+
+        # Get all weeks and sort
+        all_weeks = sorted(set(created_by_week.keys()) | set(resolved_by_week.keys()))
+
+        # Calculate cumulative values
+        cumulative_data = []
+        cum_created = 0
+        cum_resolved = 0
+
+        for week in all_weeks:
+            created_this_week = created_by_week.get(week, 0)
+            resolved_this_week = resolved_by_week.get(week, 0)
+
+            cum_created += created_this_week
+            cum_resolved += resolved_this_week
+
+            cumulative_data.append({
+                "week": week,
+                "created_this_week": created_this_week,
+                "resolved_this_week": resolved_this_week,
+                "cumulative_created": cum_created,
+                "cumulative_resolved": cum_resolved,
+                "open_bugs": cum_created - cum_resolved,
+            })
+
+        return cumulative_data
 
     def get_status_change_date(self, issue: dict, to_statuses: list) -> Optional[datetime]:
         """Get the date when issue moved to one of the specified statuses."""
@@ -361,6 +484,32 @@ class JiraMetricsExtractor:
             if issue["aging_days"] is not None and issue["aging_days"] > 0
         ]
 
+        # Bugs created weekly (with priority breakdown)
+        bugs_created = defaultdict(lambda: {
+            "total": 0, "critical": 0, "highest": 0, "high": 0, "medium": 0, "low": 0
+        })
+        for issue in parsed_issues:
+            if issue["issue_type"] == "Bug":
+                week = issue["created_week"]
+                bugs_created[week]["total"] += 1
+                priority = issue["priority"].lower()
+                if priority == "highest":
+                    bugs_created[week]["highest"] += 1
+                elif priority == "critical":
+                    bugs_created[week]["critical"] += 1
+                elif priority == "high":
+                    bugs_created[week]["high"] += 1
+                elif priority == "medium":
+                    bugs_created[week]["medium"] += 1
+                else:
+                    bugs_created[week]["low"] += 1
+
+        # Throughput by team member (weekly)
+        throughput_by_member = defaultdict(lambda: defaultdict(int))
+        for issue in parsed_issues:
+            if issue["done_week"] and issue["assignee"] != "Unassigned":
+                throughput_by_member[issue["done_week"]][issue["assignee"]] += 1
+
         return {
             "all_issues": parsed_issues,
             "throughput": dict(throughput),
@@ -369,6 +518,8 @@ class JiraMetricsExtractor:
             "assignee_workload": dict(assignee_wip),
             "cycle_time_weekly": dict(cycle_time_weekly),
             "aging_wip": aging_wip,
+            "bugs_created_weekly": dict(bugs_created),
+            "throughput_by_member": {k: dict(v) for k, v in throughput_by_member.items()},
         }
 
     def export_csv(self, metrics: dict) -> None:
@@ -501,7 +652,58 @@ class JiraMetricsExtractor:
              "aging_days", "severity"],
         )
 
+        # 8. Bugs created weekly (filtered to last N months)
+        cutoff_date = datetime.now() - timedelta(days=self.months * 30)
+        bugs_rows = []
+        for week, data in sorted(metrics["bugs_created_weekly"].items()):
+            # Parse week string (YYYY-Www) to date
+            try:
+                week_date = datetime.strptime(week + "-1", "%Y-W%W-%w")
+            except ValueError:
+                week_date = datetime.strptime(week + "-1", "%G-W%V-%u")
+            if week_date >= cutoff_date:
+                bugs_rows.append({
+                    "week": week,
+                    "bugs_created": data["total"],
+                    "priority_critical": data["critical"],
+                    "priority_highest": data["highest"],
+                    "priority_high": data["high"],
+                    "priority_medium": data["medium"],
+                    "priority_low": data["low"],
+                })
+        self._write_csv(
+            f"{self.output_dir}/bugs_created_weekly.csv",
+            bugs_rows,
+            ["week", "bugs_created", "priority_critical", "priority_highest",
+             "priority_high", "priority_medium", "priority_low"],
+        )
+
+        # 9. Throughput by team member
+        member_rows = []
+        for week, members in sorted(metrics["throughput_by_member"].items()):
+            for assignee, count in sorted(members.items(), key=lambda x: -x[1]):
+                member_rows.append({
+                    "week": week,
+                    "assignee": assignee,
+                    "issues_completed": count,
+                })
+        self._write_csv(
+            f"{self.output_dir}/throughput_by_member.csv",
+            member_rows,
+            ["week", "assignee", "issues_completed"],
+        )
+
         self.log("CSV export complete!")
+
+    def export_bug_cumulative_csv(self, cumulative_data: list) -> None:
+        """Export cumulative bug data to CSV."""
+        os.makedirs(self.output_dir, exist_ok=True)
+        self._write_csv(
+            f"{self.output_dir}/bugs_cumulative.csv",
+            cumulative_data,
+            ["week", "created_this_week", "resolved_this_week",
+             "cumulative_created", "cumulative_resolved", "open_bugs"],
+        )
 
     def _write_csv(self, filepath: str, rows: list, fieldnames: list) -> None:
         """Write rows to a CSV file."""
@@ -589,11 +791,20 @@ class JiraMetricsExtractor:
         metrics = self.calculate_metrics()
         self.export_csv(metrics)
 
+        # Fetch and export cumulative bug data if requested
+        bug_cumulative_data = None
+        if self.bug_history:
+            self.fetch_all_bugs()
+            if self.all_bugs:
+                bug_cumulative_data = self.calculate_bug_cumulative()
+                self.export_bug_cumulative_csv(bug_cumulative_data)
+
         if self.generate_charts:
             self.log("Generating charts...")
             try:
                 from charts import generate_all_charts
-                generate_all_charts(self.output_dir, verbose=self.verbose)
+                generate_all_charts(self.output_dir, verbose=self.verbose, months=self.months,
+                                    include_bug_cumulative=self.bug_history)
             except ImportError as e:
                 print(f"Warning: Could not generate charts. Install dependencies: pip install matplotlib pandas")
                 print(f"  Error: {e}")
@@ -622,6 +833,8 @@ Output Files (CSV):
   issue_types.csv         - Breakdown by issue type
   cycle_time_weekly.csv   - Cycle time statistics per week
   aging_wip.csv           - Items in progress too long
+  bugs_created_weekly.csv - Bugs created per week by priority
+  bugs_cumulative.csv     - Cumulative bug trend (with --bug-history)
 
 Charts (with --charts flag):
   chart_throughput.png         - Weekly throughput bar/line chart
@@ -630,13 +843,15 @@ Charts (with --charts flag):
   chart_issue_types.png        - Issue types donut chart
   chart_workload.png           - Assignee workload stacked bars
   chart_aging_wip.png          - Aging WIP by severity
+  chart_bugs_created.png       - Bugs created weekly by priority
+  chart_bugs_cumulative.png    - Cumulative bug trend (with --bug-history)
         """,
     )
     parser.add_argument(
         "-m", "--months",
         type=int,
-        default=6,
-        help="Number of months of data to extract (default: 6)",
+        default=None,
+        help="Number of months of data to extract (default: from config, usually 6)",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -653,19 +868,30 @@ Charts (with --charts flag):
         action="store_true",
         help="Generate PNG charts from the CSV data",
     )
+    parser.add_argument(
+        "--bug-history",
+        action="store_true",
+        help="Fetch all bugs from beginning of time for cumulative trend chart",
+    )
+
+    # Load config first to get defaults
+    load_dependencies()
 
     args = parser.parse_args()
 
+    # Use config defaults if not specified on command line
+    months = args.months if args.months is not None else DEFAULT_MONTHS
     output_dir = args.output if args.output else OUTPUT_DIR
 
-    print(f"JIRA Metrics Extractor - Extracting {args.months} months of data")
+    print(f"JIRA Metrics Extractor - Extracting {months} months of data")
     print("-" * 50)
 
     extractor = JiraMetricsExtractor(
-        months=args.months,
+        months=months,
         verbose=args.verbose,
         output_dir=output_dir,
         generate_charts=args.charts,
+        bug_history=args.bug_history,
     )
     success = extractor.run()
 
