@@ -17,8 +17,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Optional
 
-# Lazy imports - checked at runtime
-JIRA = None
+# Config loaded flag
 CONFIG_LOADED = False
 
 # Config defaults (overridden by config file)
@@ -34,22 +33,14 @@ OUTPUT_DIR = "output"
 
 
 def load_dependencies():
-    """Load jira library and config file. Called before actual work."""
-    global JIRA, CONFIG_LOADED
+    """Load config file. Called before actual work."""
+    global CONFIG_LOADED
     global JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN, STORY_POINTS_FIELD
     global IN_PROGRESS_STATUSES, DONE_STATUSES
     global AGING_WARNING_DAYS, AGING_CRITICAL_DAYS, OUTPUT_DIR
 
     if CONFIG_LOADED:
         return True
-
-    # Import jira library
-    try:
-        from jira import JIRA as JiraClient
-        JIRA = JiraClient
-    except ImportError:
-        print("Error: 'jira' package not installed. Run: pip install jira")
-        return False
 
     # Try to import local config, fall back to template
     try:
@@ -106,11 +97,12 @@ def load_dependencies():
 class JiraMetricsExtractor:
     """Extract and calculate JIRA metrics for team reporting."""
 
-    def __init__(self, months: int = 6, verbose: bool = False, output_dir: str = None):
+    def __init__(self, months: int = 6, verbose: bool = False, output_dir: str = None,
+                 generate_charts: bool = False):
         self.months = months
         self.verbose = verbose
         self.output_dir = output_dir or OUTPUT_DIR
-        self.jira = None
+        self.generate_charts = generate_charts
         self.issues = []
         self.start_date = datetime.now() - timedelta(days=months * 30)
 
@@ -121,30 +113,45 @@ class JiraMetricsExtractor:
 
     def connect(self) -> bool:
         """Establish connection to JIRA Cloud."""
+        import requests
+        from requests.auth import HTTPBasicAuth
+
         try:
             self.log(f"Connecting to {JIRA_URL}...")
-            self.jira = JIRA(
-                server=JIRA_URL,
-                basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN),
-            )
-            # Test connection
-            self.jira.myself()
-            self.log("Connected successfully!")
+
+            # Test connection with myself endpoint
+            url = f"{JIRA_URL}/rest/api/3/myself"
+            auth = HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN)
+            response = requests.get(url, auth=auth)
+            response.raise_for_status()
+
+            user = response.json()
+            self.log(f"Connected as {user.get('displayName', 'Unknown')}!")
             return True
+        except requests.exceptions.HTTPError as e:
+            print(f"Error connecting to JIRA: {e}")
+            if e.response is not None:
+                print(f"Response: {e.response.text}")
+            return False
         except Exception as e:
             print(f"Error connecting to JIRA: {e}")
             return False
 
     def fetch_issues(self) -> list:
         """Fetch all issues from JIRA within the time range."""
+        import requests
+        from requests.auth import HTTPBasicAuth
+
         start_str = self.start_date.strftime("%Y-%m-%d")
 
         # JQL to get all issues created or updated in the time range
-        jql = f"""
-            (created >= "{start_str}" OR updated >= "{start_str}" OR
-             status changed DURING ("{start_str}", now()))
-            ORDER BY created DESC
-        """.strip()
+        # Exclude Sub-task and Epic issue types
+        jql = (
+            f'(created >= "{start_str}" OR updated >= "{start_str}" OR '
+            f'status changed DURING ("{start_str}", now())) '
+            f'AND issuetype NOT IN (Sub-task, Epic) '
+            f'ORDER BY created DESC'
+        )
 
         self.log(f"Fetching issues since {start_str}...")
 
@@ -152,26 +159,51 @@ class JiraMetricsExtractor:
         start_at = 0
         max_results = 100
 
+        # Use the new v3 search/jql endpoint
+        url = f"{JIRA_URL}/rest/api/3/search/jql"
+        auth = HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN)
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+
+        next_page_token = None
+
         while True:
             try:
-                batch = self.jira.search_issues(
-                    jql,
-                    startAt=start_at,
-                    maxResults=max_results,
-                    expand="changelog",
-                    fields="*all",
-                )
+                payload = {
+                    "jql": jql,
+                    "maxResults": max_results,
+                    "fields": [
+                        "summary", "status", "issuetype", "priority", "assignee",
+                        "reporter", "created", "updated", "project", "labels",
+                        "components", STORY_POINTS_FIELD,
+                    ],
+                    "expand": "changelog",
+                }
 
-                if not batch:
+                # Add pagination token if we have one
+                if next_page_token:
+                    payload["nextPageToken"] = next_page_token
+
+                response = requests.post(url, json=payload, headers=headers, auth=auth)
+
+                # Capture response before raising
+                if response.status_code != 200:
+                    print(f"Error fetching issues: HTTP {response.status_code}")
+                    print(f"Response: {response.text}")
                     break
 
-                all_issues.extend(batch)
+                data = response.json()
+
+                issues = data.get("issues", [])
+                if not issues:
+                    break
+
+                all_issues.extend(issues)
                 self.log(f"Fetched {len(all_issues)} issues...")
 
-                if len(batch) < max_results:
+                # Check for next page
+                next_page_token = data.get("nextPageToken")
+                if not next_page_token or data.get("isLast", True):
                     break
-
-                start_at += max_results
 
             except Exception as e:
                 print(f"Error fetching issues: {e}")
@@ -181,51 +213,56 @@ class JiraMetricsExtractor:
         self.log(f"Total issues fetched: {len(self.issues)}")
         return self.issues
 
-    def get_status_change_date(self, issue, to_statuses: list) -> Optional[datetime]:
+    def get_status_change_date(self, issue: dict, to_statuses: list) -> Optional[datetime]:
         """Get the date when issue moved to one of the specified statuses."""
-        if not hasattr(issue, "changelog"):
+        changelog = issue.get("changelog")
+        if not changelog:
             return None
 
-        for history in issue.changelog.histories:
-            for item in history.items:
-                if item.field == "status" and item.toString in to_statuses:
+        for history in changelog.get("histories", []):
+            for item in history.get("items", []):
+                if item.get("field") == "status" and item.get("toString") in to_statuses:
                     return datetime.strptime(
-                        history.created[:19], "%Y-%m-%dT%H:%M:%S"
+                        history["created"][:19], "%Y-%m-%dT%H:%M:%S"
                     )
         return None
 
-    def get_first_in_progress_date(self, issue) -> Optional[datetime]:
+    def get_first_in_progress_date(self, issue: dict) -> Optional[datetime]:
         """Get the date when issue first moved to In Progress."""
-        if not hasattr(issue, "changelog"):
+        changelog = issue.get("changelog")
+        if not changelog:
             return None
 
-        for history in sorted(
-            issue.changelog.histories,
-            key=lambda h: h.created,
-        ):
-            for item in history.items:
-                if item.field == "status" and item.toString in IN_PROGRESS_STATUSES:
+        histories = sorted(
+            changelog.get("histories", []),
+            key=lambda h: h.get("created", ""),
+        )
+        for history in histories:
+            for item in history.get("items", []):
+                if item.get("field") == "status" and item.get("toString") in IN_PROGRESS_STATUSES:
                     return datetime.strptime(
-                        history.created[:19], "%Y-%m-%dT%H:%M:%S"
+                        history["created"][:19], "%Y-%m-%dT%H:%M:%S"
                     )
         return None
 
-    def get_done_date(self, issue) -> Optional[datetime]:
+    def get_done_date(self, issue: dict) -> Optional[datetime]:
         """Get the date when issue moved to Done."""
         return self.get_status_change_date(issue, DONE_STATUSES)
 
-    def get_story_points(self, issue) -> Optional[float]:
+    def get_story_points(self, issue: dict) -> Optional[float]:
         """Extract story points from custom field."""
         try:
-            points = getattr(issue.fields, STORY_POINTS_FIELD, None)
+            fields = issue.get("fields", {})
+            points = fields.get(STORY_POINTS_FIELD)
             return float(points) if points is not None else None
         except (TypeError, ValueError):
             return None
 
-    def parse_issue(self, issue) -> dict:
-        """Parse a JIRA issue into a flat dictionary."""
-        fields = issue.fields
-        created = datetime.strptime(fields.created[:19], "%Y-%m-%dT%H:%M:%S")
+    def parse_issue(self, issue: dict) -> dict:
+        """Parse a JIRA issue JSON into a flat dictionary."""
+        fields = issue.get("fields", {})
+        created_str = fields.get("created", "")[:19]
+        created = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%S") if created_str else datetime.now()
 
         in_progress_date = self.get_first_in_progress_date(issue)
         done_date = self.get_done_date(issue)
@@ -242,22 +279,32 @@ class JiraMetricsExtractor:
 
         # Calculate aging (for WIP items)
         aging_days = None
-        status = fields.status.name
+        status_obj = fields.get("status", {})
+        status = status_obj.get("name", "Unknown") if status_obj else "Unknown"
         if status in IN_PROGRESS_STATUSES:
             if in_progress_date:
                 aging_days = (datetime.now() - in_progress_date).days
             else:
                 aging_days = (datetime.now() - created).days
 
+        # Extract nested fields safely
+        project = fields.get("project", {})
+        issuetype = fields.get("issuetype", {})
+        priority = fields.get("priority", {})
+        assignee = fields.get("assignee", {})
+        reporter = fields.get("reporter", {})
+        components = fields.get("components", [])
+        labels = fields.get("labels", [])
+
         return {
-            "key": issue.key,
-            "project": fields.project.key,
-            "summary": fields.summary,
-            "issue_type": fields.issuetype.name,
+            "key": issue.get("key", ""),
+            "project": project.get("key", "") if project else "",
+            "summary": fields.get("summary", ""),
+            "issue_type": issuetype.get("name", "Unknown") if issuetype else "Unknown",
             "status": status,
-            "priority": fields.priority.name if fields.priority else "None",
-            "assignee": fields.assignee.displayName if fields.assignee else "Unassigned",
-            "reporter": fields.reporter.displayName if fields.reporter else "Unknown",
+            "priority": priority.get("name", "None") if priority else "None",
+            "assignee": assignee.get("displayName", "Unassigned") if assignee else "Unassigned",
+            "reporter": reporter.get("displayName", "Unknown") if reporter else "Unknown",
             "created": created.strftime("%Y-%m-%d"),
             "created_week": created.strftime("%Y-W%W"),
             "in_progress_date": in_progress_date.strftime("%Y-%m-%d") if in_progress_date else "",
@@ -267,8 +314,8 @@ class JiraMetricsExtractor:
             "cycle_time_days": cycle_time,
             "lead_time_days": lead_time,
             "aging_days": aging_days,
-            "labels": ",".join(fields.labels) if fields.labels else "",
-            "components": ",".join(c.name for c in fields.components) if fields.components else "",
+            "labels": ",".join(labels) if labels else "",
+            "components": ",".join(c.get("name", "") for c in components) if components else "",
         }
 
     def calculate_metrics(self) -> dict:
@@ -541,6 +588,16 @@ class JiraMetricsExtractor:
 
         metrics = self.calculate_metrics()
         self.export_csv(metrics)
+
+        if self.generate_charts:
+            self.log("Generating charts...")
+            try:
+                from charts import generate_all_charts
+                generate_all_charts(self.output_dir, verbose=self.verbose)
+            except ImportError as e:
+                print(f"Warning: Could not generate charts. Install dependencies: pip install matplotlib pandas")
+                print(f"  Error: {e}")
+
         self.print_summary(metrics)
         return True
 
@@ -555,8 +612,9 @@ Examples:
   %(prog)s --months 3         # Extract last 3 months
   %(prog)s -v                 # Verbose output
   %(prog)s --output reports   # Custom output directory
+  %(prog)s --charts           # Generate PNG charts
 
-Output Files:
+Output Files (CSV):
   issues_all.csv          - Raw issue data with all fields
   weekly_throughput.csv   - Issues and points completed per week
   status_distribution.csv - Count of issues by status
@@ -564,6 +622,14 @@ Output Files:
   issue_types.csv         - Breakdown by issue type
   cycle_time_weekly.csv   - Cycle time statistics per week
   aging_wip.csv           - Items in progress too long
+
+Charts (with --charts flag):
+  chart_throughput.png         - Weekly throughput bar/line chart
+  chart_cycle_time.png         - Cycle time trend with min/max range
+  chart_status_distribution.png - Status breakdown horizontal bars
+  chart_issue_types.png        - Issue types donut chart
+  chart_workload.png           - Assignee workload stacked bars
+  chart_aging_wip.png          - Aging WIP by severity
         """,
     )
     parser.add_argument(
@@ -582,6 +648,11 @@ Output Files:
         type=str,
         help=f"Output directory for CSV files (default: {OUTPUT_DIR})",
     )
+    parser.add_argument(
+        "-c", "--charts",
+        action="store_true",
+        help="Generate PNG charts from the CSV data",
+    )
 
     args = parser.parse_args()
 
@@ -594,6 +665,7 @@ Output Files:
         months=args.months,
         verbose=args.verbose,
         output_dir=output_dir,
+        generate_charts=args.charts,
     )
     success = extractor.run()
 
