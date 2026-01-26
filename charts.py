@@ -5,6 +5,7 @@ Generates PNG charts from the CSV files produced by jira_metrics.py.
 """
 
 import os
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -98,6 +99,11 @@ def generate_cycle_time_chart(output_dir: str, months: int = 6) -> None:
     ax.plot(df["date"], df["median_cycle_time_days"], color="#9C27B0",
             linewidth=2, marker="s", markersize=4, linestyle="--", label="Median")
 
+    # Add value labels for average and median
+    for date, avg, median in zip(df["date"], df["avg_cycle_time_days"], df["median_cycle_time_days"]):
+        ax.text(date, avg + 2, f"{avg:.1f}", ha="center", va="bottom", fontsize=7, color="#FF5722")
+        ax.text(date, median - 2, f"{int(median)}", ha="center", va="top", fontsize=7, color="#9C27B0")
+
     ax.set_xlabel("Week")
     ax.set_ylabel("Cycle Time (Days)")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-W%W"))
@@ -110,6 +116,60 @@ def generate_cycle_time_chart(output_dir: str, months: int = 6) -> None:
     plt.title("Cycle Time Trend")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_cycle_time.png"), dpi=150)
+    plt.close()
+
+
+def generate_lead_time_chart(output_dir: str, months: int = 6) -> None:
+    """Generate lead time trend chart with min/max range."""
+    csv_path = os.path.join(output_dir, "lead_time_weekly.csv")
+    if not os.path.exists(csv_path):
+        return
+
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return
+
+    df["date"] = df["week"].apply(parse_week)
+    df = df.sort_values("date")
+
+    # Filter to last N months
+    cutoff_date = datetime.now() - pd.Timedelta(days=months * 30)
+    df = df[df["date"] >= cutoff_date]
+
+    if df.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Shaded area for min/max range
+    ax.fill_between(df["date"], df["min_lead_time_days"], df["max_lead_time_days"],
+                    alpha=0.2, color="#2196F3", label="Min-Max Range")
+
+    # Line for average
+    ax.plot(df["date"], df["avg_lead_time_days"], color="#1976D2",
+            linewidth=2, marker="o", markersize=4, label="Average")
+
+    # Line for median
+    ax.plot(df["date"], df["median_lead_time_days"], color="#7B1FA2",
+            linewidth=2, marker="s", markersize=4, linestyle="--", label="Median")
+
+    # Add value labels for average and median
+    for date, avg, median in zip(df["date"], df["avg_lead_time_days"], df["median_lead_time_days"]):
+        ax.text(date, avg + 2, f"{avg:.1f}", ha="center", va="bottom", fontsize=7, color="#1976D2")
+        ax.text(date, median - 2, f"{int(median)}", ha="center", va="top", fontsize=7, color="#7B1FA2")
+
+    ax.set_xlabel("Week")
+    ax.set_ylabel("Lead Time (Days)")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-W%W"))
+    ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=max(1, len(df) // 10)))
+    plt.xticks(rotation=45, ha="right")
+
+    ax.legend(loc="upper right")
+    ax.set_ylim(bottom=0)
+
+    plt.title("Lead Time Trend (Created to Done)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "chart_lead_time.png"), dpi=150)
     plt.close()
 
 
@@ -275,6 +335,10 @@ def generate_bugs_created_chart(output_dir: str, months: int = 6) -> None:
         return
 
     df["date"] = df["week"].apply(parse_week)
+
+    # Aggregate by date to handle overlapping weeks (e.g., 2025-W52 and 2026-W00)
+    priority_cols = [c for c in df.columns if c.startswith("priority_")]
+    df = df.groupby("date", as_index=False)[priority_cols + ["bugs_created"]].sum()
     df = df.sort_values("date")
 
     # Filter to last N months
@@ -304,18 +368,70 @@ def generate_bugs_created_chart(output_dir: str, months: int = 6) -> None:
                    color=color, label=label, alpha=0.9)
             bottom = [b + v for b, v in zip(bottom, df[col])]
 
+    # Add total count labels on top of bars
+    for i, (date, total) in enumerate(zip(df["date"], bottom)):
+        if total > 0:
+            ax.text(date, total + 0.3, str(int(total)), ha="center", va="bottom", fontsize=8)
+
     ax.set_xlabel("Week")
     ax.set_ylabel("Bugs Created")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-W%W"))
     ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=max(1, len(df) // 10)))
     plt.xticks(rotation=45, ha="right")
 
-    ax.legend(loc="upper left")
+    ax.legend(loc="upper right")
     ax.set_ylim(bottom=0)
 
     plt.title("Bugs Created Weekly by Priority")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_bugs_created.png"), dpi=150)
+    plt.close()
+
+
+def generate_correction_required_chart(output_dir: str, months: int = 6) -> None:
+    """Generate bar chart for tickets moved to 'Correction Required' weekly."""
+    csv_path = os.path.join(output_dir, "correction_required_weekly.csv")
+    if not os.path.exists(csv_path):
+        return
+
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return
+
+    df["date"] = df["week"].apply(parse_week)
+    df = df.sort_values("date")
+
+    # Filter to last N months
+    cutoff_date = datetime.now() - pd.Timedelta(days=months * 30)
+    df = df[df["date"] >= cutoff_date]
+
+    if df.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Bar chart
+    bars = ax.bar(df["date"], df["count"], width=5, alpha=0.8, color="#FF5722")
+
+    # Add trend line
+    if len(df) > 1:
+        z = np.polyfit(range(len(df)), df["count"], 1)
+        p = np.poly1d(z)
+        ax.plot(df["date"], p(range(len(df))), color="#B71C1C",
+                linewidth=2, linestyle="--", label="Trend")
+        ax.legend(loc="upper left")
+
+    ax.set_xlabel("Week")
+    ax.set_ylabel("Tickets Moved to Correction Required")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-W%W"))
+    ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=max(1, len(df) // 10)))
+    plt.xticks(rotation=45, ha="right")
+
+    ax.set_ylim(bottom=0)
+
+    plt.title("Weekly Tickets Moved to 'Correction Required'")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "chart_correction_required.png"), dpi=150)
     plt.close()
 
 
@@ -410,9 +526,21 @@ def generate_bugs_cumulative_chart(output_dir: str) -> None:
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=max(1, len(df) // 20)))
     plt.xticks(rotation=45, ha="right")
 
-    ax.legend(loc="upper left")
     ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.3)
+
+    # Add summary text box with latest values
+    latest = df.iloc[-1]
+    summary_text = (
+        f"Latest Summary:\n"
+        f"  Created: {int(latest['cumulative_created'])}\n"
+        f"  Resolved: {int(latest['cumulative_resolved'])}\n"
+        f"  Open: {int(latest['open_bugs'])}"
+    )
+    ax.text(0.02, 0.58, summary_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', horizontalalignment='left',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'))
+    ax.legend(loc="upper left")
 
     plt.title("Cumulative Bug Trend (All Time)")
     plt.tight_layout()
@@ -426,11 +554,13 @@ def generate_all_charts(output_dir: str, verbose: bool = False, months: int = 6,
     chart_functions = [
         ("Throughput", generate_throughput_chart, {}),
         ("Cycle Time", generate_cycle_time_chart, {"months": months}),
+        ("Lead Time", generate_lead_time_chart, {"months": months}),
         ("Status Distribution", generate_status_distribution_chart, {}),
         ("Issue Types", generate_issue_types_chart, {}),
         ("Workload", generate_workload_chart, {}),
         ("Aging WIP", generate_aging_wip_chart, {}),
         ("Bugs Created", generate_bugs_created_chart, {"months": months}),
+        ("Correction Required", generate_correction_required_chart, {"months": months}),
         ("Throughput by Member", generate_throughput_by_member_chart, {"weeks": 6}),
     ]
 

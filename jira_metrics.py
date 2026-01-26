@@ -372,6 +372,20 @@ class JiraMetricsExtractor:
         """Get the date when issue moved to Done."""
         return self.get_status_change_date(issue, DONE_STATUSES)
 
+    def get_correction_required_dates(self, issue: dict) -> list:
+        """Get all dates when issue moved to 'Correction Required' status."""
+        changelog = issue.get("changelog")
+        if not changelog:
+            return []
+
+        dates = []
+        for history in changelog.get("histories", []):
+            for item in history.get("items", []):
+                if item.get("field") == "status" and item.get("toString") == "Correction Required":
+                    date = datetime.strptime(history["created"][:19], "%Y-%m-%dT%H:%M:%S")
+                    dates.append(date)
+        return dates
+
     def get_story_points(self, issue: dict) -> Optional[float]:
         """Extract story points from custom field."""
         try:
@@ -478,6 +492,12 @@ class JiraMetricsExtractor:
             if issue["done_week"] and issue["cycle_time_days"] is not None:
                 cycle_time_weekly[issue["done_week"]].append(issue["cycle_time_days"])
 
+        # Lead time by week
+        lead_time_weekly = defaultdict(list)
+        for issue in parsed_issues:
+            if issue["done_week"] and issue["lead_time_days"] is not None:
+                lead_time_weekly[issue["done_week"]].append(issue["lead_time_days"])
+
         # Aging WIP
         aging_wip = [
             issue for issue in parsed_issues
@@ -517,6 +537,7 @@ class JiraMetricsExtractor:
             "type_breakdown": dict(type_breakdown),
             "assignee_workload": dict(assignee_wip),
             "cycle_time_weekly": dict(cycle_time_weekly),
+            "lead_time_weekly": dict(lead_time_weekly),
             "aging_wip": aging_wip,
             "bugs_created_weekly": dict(bugs_created),
             "throughput_by_member": {k: dict(v) for k, v in throughput_by_member.items()},
@@ -625,7 +646,32 @@ class JiraMetricsExtractor:
              "max_cycle_time_days", "median_cycle_time_days", "issues_count"],
         )
 
-        # 7. Aging WIP
+        # 7. Lead time weekly
+        lead_rows = []
+        for week, times in sorted(metrics["lead_time_weekly"].items()):
+            if times:
+                avg_lead = sum(times) / len(times)
+                min_lead = min(times)
+                max_lead = max(times)
+                median_lead = sorted(times)[len(times) // 2]
+            else:
+                avg_lead = min_lead = max_lead = median_lead = 0
+            lead_rows.append({
+                "week": week,
+                "avg_lead_time_days": round(avg_lead, 1),
+                "min_lead_time_days": min_lead,
+                "max_lead_time_days": max_lead,
+                "median_lead_time_days": median_lead,
+                "issues_count": len(times),
+            })
+        self._write_csv(
+            f"{self.output_dir}/lead_time_weekly.csv",
+            lead_rows,
+            ["week", "avg_lead_time_days", "min_lead_time_days",
+             "max_lead_time_days", "median_lead_time_days", "issues_count"],
+        )
+
+        # 8. Aging WIP
         aging_rows = sorted(
             [
                 {
@@ -652,7 +698,7 @@ class JiraMetricsExtractor:
              "aging_days", "severity"],
         )
 
-        # 8. Bugs created weekly (filtered to last N months)
+        # 9. Bugs created weekly (filtered to last N months)
         cutoff_date = datetime.now() - timedelta(days=self.months * 30)
         bugs_rows = []
         for week, data in sorted(metrics["bugs_created_weekly"].items()):
@@ -678,7 +724,7 @@ class JiraMetricsExtractor:
              "priority_high", "priority_medium", "priority_low"],
         )
 
-        # 9. Throughput by team member
+        # 10. Throughput by team member
         member_rows = []
         for week, members in sorted(metrics["throughput_by_member"].items()):
             for assignee, count in sorted(members.items(), key=lambda x: -x[1]):
@@ -832,6 +878,7 @@ Output Files (CSV):
   assignee_workload.csv   - Current WIP per team member
   issue_types.csv         - Breakdown by issue type
   cycle_time_weekly.csv   - Cycle time statistics per week
+  lead_time_weekly.csv    - Lead time statistics per week
   aging_wip.csv           - Items in progress too long
   bugs_created_weekly.csv - Bugs created per week by priority
   bugs_cumulative.csv     - Cumulative bug trend (with --bug-history)
@@ -839,6 +886,7 @@ Output Files (CSV):
 Charts (with --charts flag):
   chart_throughput.png         - Weekly throughput bar/line chart
   chart_cycle_time.png         - Cycle time trend with min/max range
+  chart_lead_time.png          - Lead time trend with min/max range
   chart_status_distribution.png - Status breakdown horizontal bars
   chart_issue_types.png        - Issue types donut chart
   chart_workload.png           - Assignee workload stacked bars
