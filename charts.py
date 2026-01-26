@@ -20,7 +20,7 @@ def parse_week(week_str: str) -> datetime:
         return datetime.strptime(week_str + "-1", "%G-W%V-%u")
 
 
-def generate_throughput_chart(output_dir: str) -> None:
+def generate_throughput_chart(output_dir: str, months: int = 6) -> None:
     """Generate weekly throughput chart with issues and story points."""
     csv_path = os.path.join(output_dir, "weekly_throughput.csv")
     if not os.path.exists(csv_path):
@@ -59,7 +59,7 @@ def generate_throughput_chart(output_dir: str) -> None:
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
 
-    plt.title("Weekly Throughput")
+    plt.title(f"Weekly Throughput (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_throughput.png"), dpi=150)
     plt.close()
@@ -113,7 +113,7 @@ def generate_cycle_time_chart(output_dir: str, months: int = 6) -> None:
     ax.legend(loc="upper right")
     ax.set_ylim(bottom=0)
 
-    plt.title("Cycle Time Trend")
+    plt.title(f"Cycle Time Trend (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_cycle_time.png"), dpi=150)
     plt.close()
@@ -167,13 +167,13 @@ def generate_lead_time_chart(output_dir: str, months: int = 6) -> None:
     ax.legend(loc="upper right")
     ax.set_ylim(bottom=0)
 
-    plt.title("Lead Time Trend (Created to Done)")
+    plt.title(f"Lead Time Trend (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_lead_time.png"), dpi=150)
     plt.close()
 
 
-def generate_status_distribution_chart(output_dir: str) -> None:
+def generate_status_distribution_chart(output_dir: str, months: int = 6) -> None:
     """Generate horizontal bar chart for status distribution."""
     csv_path = os.path.join(output_dir, "status_distribution.csv")
     if not os.path.exists(csv_path):
@@ -200,13 +200,13 @@ def generate_status_distribution_chart(output_dir: str) -> None:
     ax.set_ylabel("Status")
     ax.set_xlim(right=df["count"].max() * 1.1)
 
-    plt.title("Status Distribution")
+    plt.title(f"Status Distribution (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_status_distribution.png"), dpi=150)
     plt.close()
 
 
-def generate_issue_types_chart(output_dir: str) -> None:
+def generate_issue_types_chart(output_dir: str, months: int = 6) -> None:
     """Generate pie/donut chart for issue types."""
     csv_path = os.path.join(output_dir, "issue_types.csv")
     if not os.path.exists(csv_path):
@@ -231,13 +231,13 @@ def generate_issue_types_chart(output_dir: str) -> None:
     for autotext in autotexts:
         autotext.set_fontsize(9)
 
-    plt.title("Issue Types Distribution")
+    plt.title(f"Issue Types Distribution (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_issue_types.png"), dpi=150)
     plt.close()
 
 
-def generate_workload_chart(output_dir: str) -> None:
+def generate_workload_chart(output_dir: str, months: int = 6) -> None:
     """Generate stacked horizontal bar chart for assignee workload."""
     csv_path = os.path.join(output_dir, "assignee_workload.csv")
     if not os.path.exists(csv_path):
@@ -265,13 +265,13 @@ def generate_workload_chart(output_dir: str) -> None:
     ax.set_ylabel("Assignee")
     ax.legend(loc="lower right")
 
-    plt.title("Assignee Workload (Top 15)")
+    plt.title(f"Assignee Workload - Top 15 (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_workload.png"), dpi=150)
     plt.close()
 
 
-def generate_aging_wip_chart(output_dir: str) -> None:
+def generate_aging_wip_chart(output_dir: str, months: int = 6) -> None:
     """Generate horizontal bar chart for aging WIP colored by severity."""
     csv_path = os.path.join(output_dir, "aging_wip.csv")
     if not os.path.exists(csv_path):
@@ -318,7 +318,7 @@ def generate_aging_wip_chart(output_dir: str) -> None:
     ]
     ax.legend(handles=legend_elements, loc="lower right")
 
-    plt.title("Aging Work In Progress (Top 20)")
+    plt.title(f"Aging Work In Progress - Top 20 (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_aging_wip.png"), dpi=150)
     plt.close()
@@ -382,7 +382,7 @@ def generate_bugs_created_chart(output_dir: str, months: int = 6) -> None:
     ax.legend(loc="upper right")
     ax.set_ylim(bottom=0)
 
-    plt.title("Bugs Created Weekly by Priority")
+    plt.title(f"Bugs Created Weekly by Priority (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_bugs_created.png"), dpi=150)
     plt.close()
@@ -429,7 +429,7 @@ def generate_correction_required_chart(output_dir: str, months: int = 6) -> None
 
     ax.set_ylim(bottom=0)
 
-    plt.title("Weekly Tickets Moved to 'Correction Required'")
+    plt.title(f"Weekly Tickets Moved to 'Correction Required' (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_correction_required.png"), dpi=150)
     plt.close()
@@ -552,13 +552,13 @@ def generate_all_charts(output_dir: str, verbose: bool = False, months: int = 6,
                         include_bug_cumulative: bool = False) -> None:
     """Generate all charts from CSV files in the output directory."""
     chart_functions = [
-        ("Throughput", generate_throughput_chart, {}),
+        ("Throughput", generate_throughput_chart, {"months": months}),
         ("Cycle Time", generate_cycle_time_chart, {"months": months}),
         ("Lead Time", generate_lead_time_chart, {"months": months}),
-        ("Status Distribution", generate_status_distribution_chart, {}),
-        ("Issue Types", generate_issue_types_chart, {}),
-        ("Workload", generate_workload_chart, {}),
-        ("Aging WIP", generate_aging_wip_chart, {}),
+        ("Status Distribution", generate_status_distribution_chart, {"months": months}),
+        ("Issue Types", generate_issue_types_chart, {"months": months}),
+        ("Workload", generate_workload_chart, {"months": months}),
+        ("Aging WIP", generate_aging_wip_chart, {"months": months}),
         ("Bugs Created", generate_bugs_created_chart, {"months": months}),
         ("Correction Required", generate_correction_required_chart, {"months": months}),
         ("Throughput by Member", generate_throughput_by_member_chart, {"weeks": 6}),
