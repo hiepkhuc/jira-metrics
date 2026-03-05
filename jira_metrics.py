@@ -35,6 +35,7 @@ DEFAULT_MONTHS = 6
 CONFLUENCE_SPACE_KEY = "ENG"
 CONFLUENCE_ROOT_PAGE_TITLE = "JIRA Metrics Reports"
 ISSUE_TYPES = ["Bug", "Improvement", "Story", "Task", "Sub-task"]
+JIRA_PROJECTS = ["QXM"]
 
 
 def load_dependencies():
@@ -44,7 +45,7 @@ def load_dependencies():
     global IN_PROGRESS_STATUSES, WIP_HEALTH_STATUSES, DONE_STATUSES
     global AGING_WARNING_DAYS, AGING_CRITICAL_DAYS, OUTPUT_DIR, DEFAULT_MONTHS
     global CONFLUENCE_SPACE_KEY, CONFLUENCE_ROOT_PAGE_TITLE
-    global ISSUE_TYPES
+    global ISSUE_TYPES, JIRA_PROJECTS
 
     if CONFIG_LOADED:
         return True
@@ -65,6 +66,7 @@ def load_dependencies():
             CONFLUENCE_SPACE_KEY as conf_space,
             CONFLUENCE_ROOT_PAGE_TITLE as conf_root,
             ISSUE_TYPES as issue_types,
+            JIRA_PROJECTS as jira_projects,
         )
         JIRA_URL = url
         JIRA_EMAIL = email
@@ -80,6 +82,7 @@ def load_dependencies():
         CONFLUENCE_SPACE_KEY = conf_space
         CONFLUENCE_ROOT_PAGE_TITLE = conf_root
         ISSUE_TYPES = issue_types
+        JIRA_PROJECTS = jira_projects
     except ImportError:
         try:
             from config import (
@@ -96,6 +99,7 @@ def load_dependencies():
                 CONFLUENCE_SPACE_KEY as conf_space,
                 CONFLUENCE_ROOT_PAGE_TITLE as conf_root,
                 ISSUE_TYPES as issue_types,
+                JIRA_PROJECTS as jira_projects,
             )
             JIRA_URL = url
             JIRA_EMAIL = email
@@ -111,6 +115,7 @@ def load_dependencies():
             CONFLUENCE_SPACE_KEY = conf_space
             CONFLUENCE_ROOT_PAGE_TITLE = conf_root
             ISSUE_TYPES = issue_types
+            JIRA_PROJECTS = jira_projects
         except ImportError:
             print("Error: No config file found. Create config.py or config_local.py")
             return False
@@ -179,9 +184,12 @@ class JiraMetricsExtractor:
         jql = (
             f'(created >= "{start_str}" OR '
             f'status changed DURING ("{start_str}", now())) '
-            f'AND issuetype IN ({type_list}) '
-            f'ORDER BY created DESC'
+            f'AND issuetype IN ({type_list})'
         )
+        if JIRA_PROJECTS:
+            project_list = ", ".join(f'"{p}"' for p in JIRA_PROJECTS)
+            jql += f' AND project IN ({project_list})'
+        jql += ' ORDER BY created DESC'
 
         self.log(f"Fetching issues since {start_str}...")
 
@@ -249,7 +257,11 @@ class JiraMetricsExtractor:
         from requests.auth import HTTPBasicAuth
 
         # JQL to get all bugs, ordered by creation date
-        jql = 'issuetype = Bug ORDER BY created ASC'
+        jql = 'issuetype = Bug'
+        if JIRA_PROJECTS:
+            project_list = ", ".join(f'"{p}"' for p in JIRA_PROJECTS)
+            jql += f' AND project IN ({project_list})'
+        jql += ' ORDER BY created ASC'
 
         self.log("Fetching all bugs for cumulative analysis...")
 

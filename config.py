@@ -39,6 +39,9 @@ ISSUE_TYPES = [
     "Sub-task",
 ]
 
+# JIRA project keys to filter. Empty list = all projects.
+JIRA_PROJECTS = ["QXM Development"]
+
 # Aging WIP thresholds (days)
 AGING_WARNING_DAYS = 14  # Items older than this are flagged
 AGING_CRITICAL_DAYS = 30  # Items older than this are critical

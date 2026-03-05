@@ -75,7 +75,7 @@ def generate_throughput_chart(output_dir: str, months: int = 6) -> None:
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
 
-    plt.title(f"Weekly Throughput (Last {months} Months)")
+    plt.title(f"Weekly Team Throughput (Last {months} Months)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "chart_throughput.png"), dpi=150)
     plt.close()
