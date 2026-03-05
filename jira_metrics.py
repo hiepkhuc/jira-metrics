@@ -25,20 +25,26 @@ JIRA_URL = ""
 JIRA_EMAIL = ""
 JIRA_API_TOKEN = ""
 STORY_POINTS_FIELD = "customfield_10016"
-IN_PROGRESS_STATUSES = ["In Progress", "In Review", "Code Review", "Testing", "QA"]
+IN_PROGRESS_STATUSES = ["In Progress", "In Review", "Code Review", "Testing", "QA", "Correction Required"]
+WIP_HEALTH_STATUSES = ["To Do"] + [s for s in IN_PROGRESS_STATUSES if s != "To Do"]
 DONE_STATUSES = ["Done", "Closed", "Resolved", "Complete"]
 AGING_WARNING_DAYS = 14
 AGING_CRITICAL_DAYS = 30
 OUTPUT_DIR = "output"
 DEFAULT_MONTHS = 6
+CONFLUENCE_SPACE_KEY = "ENG"
+CONFLUENCE_ROOT_PAGE_TITLE = "JIRA Metrics Reports"
+ISSUE_TYPES = ["Bug", "Improvement", "Story", "Task", "Sub-task"]
 
 
 def load_dependencies():
     """Load config file. Called before actual work."""
     global CONFIG_LOADED
     global JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN, STORY_POINTS_FIELD
-    global IN_PROGRESS_STATUSES, DONE_STATUSES
+    global IN_PROGRESS_STATUSES, WIP_HEALTH_STATUSES, DONE_STATUSES
     global AGING_WARNING_DAYS, AGING_CRITICAL_DAYS, OUTPUT_DIR, DEFAULT_MONTHS
+    global CONFLUENCE_SPACE_KEY, CONFLUENCE_ROOT_PAGE_TITLE
+    global ISSUE_TYPES
 
     if CONFIG_LOADED:
         return True
@@ -56,17 +62,24 @@ def load_dependencies():
             AGING_CRITICAL_DAYS as crit_days,
             OUTPUT_DIR as out_dir,
             DEFAULT_MONTHS as def_months,
+            CONFLUENCE_SPACE_KEY as conf_space,
+            CONFLUENCE_ROOT_PAGE_TITLE as conf_root,
+            ISSUE_TYPES as issue_types,
         )
         JIRA_URL = url
         JIRA_EMAIL = email
         JIRA_API_TOKEN = token
         STORY_POINTS_FIELD = sp_field
         IN_PROGRESS_STATUSES = ip_statuses
+        WIP_HEALTH_STATUSES = ["To Do"] + [s for s in IN_PROGRESS_STATUSES if s != "To Do"]
         DONE_STATUSES = done_statuses
         AGING_WARNING_DAYS = warn_days
         AGING_CRITICAL_DAYS = crit_days
         OUTPUT_DIR = out_dir
         DEFAULT_MONTHS = def_months
+        CONFLUENCE_SPACE_KEY = conf_space
+        CONFLUENCE_ROOT_PAGE_TITLE = conf_root
+        ISSUE_TYPES = issue_types
     except ImportError:
         try:
             from config import (
@@ -80,17 +93,24 @@ def load_dependencies():
                 AGING_CRITICAL_DAYS as crit_days,
                 OUTPUT_DIR as out_dir,
                 DEFAULT_MONTHS as def_months,
+                CONFLUENCE_SPACE_KEY as conf_space,
+                CONFLUENCE_ROOT_PAGE_TITLE as conf_root,
+                ISSUE_TYPES as issue_types,
             )
             JIRA_URL = url
             JIRA_EMAIL = email
             JIRA_API_TOKEN = token
             STORY_POINTS_FIELD = sp_field
             IN_PROGRESS_STATUSES = ip_statuses
+            WIP_HEALTH_STATUSES = ["To Do"] + [s for s in IN_PROGRESS_STATUSES if s != "To Do"]
             DONE_STATUSES = done_statuses
             AGING_WARNING_DAYS = warn_days
             AGING_CRITICAL_DAYS = crit_days
             OUTPUT_DIR = out_dir
             DEFAULT_MONTHS = def_months
+            CONFLUENCE_SPACE_KEY = conf_space
+            CONFLUENCE_ROOT_PAGE_TITLE = conf_root
+            ISSUE_TYPES = issue_types
         except ImportError:
             print("Error: No config file found. Create config.py or config_local.py")
             return False
@@ -103,12 +123,14 @@ class JiraMetricsExtractor:
     """Extract and calculate JIRA metrics for team reporting."""
 
     def __init__(self, months: int = 6, verbose: bool = False, output_dir: str = None,
-                 generate_charts: bool = False, bug_history: bool = False):
+                 generate_charts: bool = False, bug_history: bool = False,
+                 confluence: bool = False):
         self.months = months
         self.verbose = verbose
         self.output_dir = output_dir or OUTPUT_DIR
         self.generate_charts = generate_charts
         self.bug_history = bug_history
+        self.confluence = confluence
         self.issues = []
         self.all_bugs = []
         self.start_date = datetime.now() - timedelta(days=months * 30)
@@ -152,11 +174,12 @@ class JiraMetricsExtractor:
         start_str = self.start_date.strftime("%Y-%m-%d")
 
         # JQL to get all issues created or updated in the time range
-        # Exclude Sub-task and Epic issue types
+        # Filter to configured issue types
+        type_list = ", ".join(f'"{t}"' for t in ISSUE_TYPES)
         jql = (
             f'(created >= "{start_str}" OR '
             f'status changed DURING ("{start_str}", now())) '
-            f'AND issuetype NOT IN (Sub-task, Epic) '
+            f'AND issuetype IN ({type_list}) '
             f'ORDER BY created DESC'
         )
 
@@ -418,7 +441,7 @@ class JiraMetricsExtractor:
         aging_days = None
         status_obj = fields.get("status", {})
         status = status_obj.get("name", "Unknown") if status_obj else "Unknown"
-        if status in IN_PROGRESS_STATUSES:
+        if status in IN_PROGRESS_STATUSES and status != "To Do":
             if in_progress_date:
                 aging_days = (datetime.now() - in_progress_date).days
             else:
@@ -479,12 +502,15 @@ class JiraMetricsExtractor:
         for issue in parsed_issues:
             type_breakdown[issue["issue_type"]] += 1
 
-        # Assignee workload (current WIP)
-        assignee_wip = defaultdict(lambda: {"in_progress": 0, "total": 0})
+        # Assignee workload (3 categories: To Do, In Progress, Done)
+        assignee_wip = defaultdict(lambda: {"to_do": 0, "in_progress": 0, "done": 0})
         for issue in parsed_issues:
-            assignee_wip[issue["assignee"]]["total"] += 1
-            if issue["status"] in IN_PROGRESS_STATUSES:
+            if issue["status"] == "To Do":
+                assignee_wip[issue["assignee"]]["to_do"] += 1
+            elif issue["status"] in IN_PROGRESS_STATUSES:
                 assignee_wip[issue["assignee"]]["in_progress"] += 1
+            elif issue["status"] in DONE_STATUSES:
+                assignee_wip[issue["assignee"]]["done"] += 1
 
         # Cycle time by week
         cycle_time_weekly = defaultdict(list)
@@ -530,6 +556,13 @@ class JiraMetricsExtractor:
             if issue["done_week"] and issue["assignee"] != "Unassigned":
                 throughput_by_member[issue["done_week"]][issue["assignee"]] += 1
 
+        # WIP Health: breakdown by assignee and WIP status (includes To Do)
+        wip_health = defaultdict(lambda: defaultdict(int))
+        for issue in parsed_issues:
+            status = issue["status"]
+            if status in WIP_HEALTH_STATUSES:
+                wip_health[issue["assignee"]][status] += 1
+
         return {
             "all_issues": parsed_issues,
             "throughput": dict(throughput),
@@ -541,6 +574,7 @@ class JiraMetricsExtractor:
             "aging_wip": aging_wip,
             "bugs_created_weekly": dict(bugs_created),
             "throughput_by_member": {k: dict(v) for k, v in throughput_by_member.items()},
+            "wip_health": {k: dict(v) for k, v in wip_health.items()},
         }
 
     def export_csv(self, metrics: dict) -> None:
@@ -589,22 +623,25 @@ class JiraMetricsExtractor:
             ["status", "count"],
         )
 
-        # 4. Assignee workload
+        # 4. Assignee workload (To Do, In Progress, Done)
+        excluded_assignees = ["Steve Hanov", "Aaron Martens"]
         workload_rows = [
             {
                 "assignee": assignee,
+                "to_do": data["to_do"],
                 "in_progress": data["in_progress"],
-                "total_issues": data["total"],
+                "done": data["done"],
             }
             for assignee, data in sorted(
                 metrics["assignee_workload"].items(),
-                key=lambda x: -x[1]["in_progress"],
+                key=lambda x: -(x[1]["to_do"] + x[1]["in_progress"] + x[1]["done"]),
             )
+            if assignee not in excluded_assignees
         ]
         self._write_csv(
             f"{self.output_dir}/assignee_workload.csv",
             workload_rows,
-            ["assignee", "in_progress", "total_issues"],
+            ["assignee", "to_do", "in_progress", "done"],
         )
 
         # 5. Issue types
@@ -728,15 +765,35 @@ class JiraMetricsExtractor:
         member_rows = []
         for week, members in sorted(metrics["throughput_by_member"].items()):
             for assignee, count in sorted(members.items(), key=lambda x: -x[1]):
-                member_rows.append({
-                    "week": week,
-                    "assignee": assignee,
-                    "issues_completed": count,
-                })
+                if assignee not in excluded_assignees:
+                    member_rows.append({
+                        "week": week,
+                        "assignee": assignee,
+                        "issues_completed": count,
+                    })
         self._write_csv(
             f"{self.output_dir}/throughput_by_member.csv",
             member_rows,
             ["week", "assignee", "issues_completed"],
+        )
+
+        # 11. WIP Health by assignee and status (includes To Do)
+        wip_rows = []
+        for assignee, statuses in sorted(metrics["wip_health"].items()):
+            if assignee in excluded_assignees:
+                continue
+            row = {"assignee": assignee}
+            total = 0
+            for status in WIP_HEALTH_STATUSES:
+                count = statuses.get(status, 0)
+                row[status.replace(" ", "_")] = count
+                total += count
+            row["Total"] = total
+            wip_rows.append(row)
+        self._write_csv(
+            f"{self.output_dir}/wip_health.csv",
+            wip_rows,
+            ["assignee"] + [s.replace(" ", "_") for s in WIP_HEALTH_STATUSES] + ["Total"],
         )
 
         self.log("CSV export complete!")
@@ -855,6 +912,27 @@ class JiraMetricsExtractor:
                 print(f"Warning: Could not generate charts. Install dependencies: pip install matplotlib pandas")
                 print(f"  Error: {e}")
 
+        # Publish to Confluence if requested
+        if self.confluence:
+            self.log("Publishing to Confluence...")
+            try:
+                from confluence_publisher import ConfluencePublisher
+                publisher = ConfluencePublisher(
+                    base_url=JIRA_URL,
+                    email=JIRA_EMAIL,
+                    api_token=JIRA_API_TOKEN,
+                    space_key=CONFLUENCE_SPACE_KEY,
+                    root_page_title=CONFLUENCE_ROOT_PAGE_TITLE,
+                )
+                publisher.publish_report(
+                    output_dir=self.output_dir,
+                    months=self.months,
+                    include_bug_cumulative=self.bug_history,
+                    verbose=self.verbose,
+                )
+            except Exception as e:
+                print(f"Warning: Failed to publish to Confluence: {e}")
+
         self.print_summary(metrics)
         return True
 
@@ -870,6 +948,7 @@ Examples:
   %(prog)s -v                 # Verbose output
   %(prog)s --output reports   # Custom output directory
   %(prog)s --charts           # Generate PNG charts
+  %(prog)s --charts --confluence  # Generate charts and publish to Confluence
 
 Output Files (CSV):
   issues_all.csv          - Raw issue data with all fields
@@ -921,6 +1000,11 @@ Charts (with --charts flag):
         action="store_true",
         help="Fetch all bugs from beginning of time for cumulative trend chart",
     )
+    parser.add_argument(
+        "--confluence",
+        action="store_true",
+        help="Publish charts and analysis to a Confluence page",
+    )
 
     # Load config first to get defaults
     load_dependencies()
@@ -940,6 +1024,7 @@ Charts (with --charts flag):
         output_dir=output_dir,
         generate_charts=args.charts,
         bug_history=args.bug_history,
+        confluence=args.confluence,
     )
     success = extractor.run()
 

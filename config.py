@@ -30,6 +30,15 @@ DONE_STATUSES = [
     "Archived"
 ]
 
+# Issue types to include in metrics extraction
+ISSUE_TYPES = [
+    "Bug",
+    "Improvement",
+    "Story",
+    "Task",
+    "Sub-task",
+]
+
 # Aging WIP thresholds (days)
 AGING_WARNING_DAYS = 14  # Items older than this are flagged
 AGING_CRITICAL_DAYS = 30  # Items older than this are critical
@@ -39,3 +48,9 @@ OUTPUT_DIR = "output"
 
 # Default number of months to extract/display
 DEFAULT_MONTHS = 6
+
+# Confluence Publishing Settings
+# Space key where reports will be published (e.g., "ENG")
+CONFLUENCE_SPACE_KEY = "ENG"
+# Parent page title under which report pages are created
+CONFLUENCE_ROOT_PAGE_TITLE = "JIRA Metrics Reports"
